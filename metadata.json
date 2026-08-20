@@ -1,0 +1,6 @@
+{
+  "name": "Tesla Landing Page",
+  "description": "Tesla investment and innovation showcase featuring interactive animations, video backgrounds, and key metrics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

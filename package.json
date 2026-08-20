@@ -1,0 +1,14 @@
+{
+  "name": "tesla-landing-page",
+  "version": "1.0.0",
+  "description": "Tesla investment and product landing page",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "build": "node -e \"console.log('Build complete')\""
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
