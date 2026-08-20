@@ -282,19 +282,44 @@ function validateSettingsUpdate(req, res, next) {
   next();
 }
 
-module.exports = {
-  validateRegister,
-  validateLogin,
-  validateForgotPassword,
-  validateResetPassword,
-  validateChangePassword,
-  validateVerifyEmail,
-  validateProfileUpdate,
-  validateAvatarUpload,
-  validateSettingsUpdate,
-  validateInvestmentCreation,
-  validatePaymentInitialization
-};
+function validateInvestmentCreation(req, res, next) {
+  const body = req.body || {};
+  const targetPlan = body.planId || body.plan_id || body.slug;
+  const amount = body.amount;
+
+  if (!targetPlan || typeof targetPlan !== 'string' || !targetPlan.trim()) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Plan ID or slug is required'
+      }
+    });
+  }
+
+  if (amount === undefined || amount === null) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Investment amount is required'
+      }
+    });
+  }
+
+  const numAmount = typeof amount === 'string' ? parseFloat(amount) : Number(amount);
+  if (isNaN(numAmount) || numAmount <= 0) {
+    return res.status(400).json({
+      success: false,
+      error: {
+        code: 'INVALID_AMOUNT',
+        message: 'Investment amount must be a positive number'
+      }
+    });
+  }
+
+  next();
+}
 
 function validatePaymentInitialization(req, res, next) {
   const body = req.body || {};
@@ -334,42 +359,17 @@ function validatePaymentInitialization(req, res, next) {
   next();
 }
 
-function validateInvestmentCreation(req, res, next) {
-  const body = req.body || {};
-  const targetPlan = body.planId || body.plan_id || body.slug;
-  const amount = body.amount;
-
-  if (!targetPlan || typeof targetPlan !== 'string' || !targetPlan.trim()) {
-    return res.status(400).json({
-      success: false,
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: 'Plan ID or slug is required'
-      }
-    });
-  }
-
-  if (amount === undefined || amount === null) {
-    return res.status(400).json({
-      success: false,
-      error: {
-        code: 'VALIDATION_ERROR',
-        message: 'Investment amount is required'
-      }
-    });
-  }
-
-  const numAmount = typeof amount === 'string' ? parseFloat(amount) : Number(amount);
-  if (isNaN(numAmount) || numAmount <= 0) {
-    return res.status(400).json({
-      success: false,
-      error: {
-        code: 'INVALID_AMOUNT',
-        message: 'Investment amount must be a positive number'
-      }
-    });
-  }
-
-  next();
-}
+module.exports = {
+  validateRegister,
+  validateLogin,
+  validateForgotPassword,
+  validateResetPassword,
+  validateChangePassword,
+  validateVerifyEmail,
+  validateProfileUpdate,
+  validateAvatarUpload,
+  validateSettingsUpdate,
+  validateInvestmentCreation,
+  validatePaymentInitialization
+};
 

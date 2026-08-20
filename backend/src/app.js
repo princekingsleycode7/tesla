@@ -47,6 +47,10 @@ app.get('/v2', (req, res) => {
   res.sendFile(path.join(staticRoot, 'v2.html'));
 });
 
+app.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(staticRoot, 'dashboard.html'));
+});
+
 // 6. Handle 404s
 app.use(notFoundHandler);
 

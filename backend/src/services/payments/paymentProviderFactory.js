@@ -1,5 +1,7 @@
 const StripePaymentProvider = require('./StripePaymentProvider');
 const TeslaPayProvider = require('./TeslaPayProvider');
+const NOWPaymentsProvider = require('./NOWPaymentsProvider');
+const KoraProvider = require('./KoraProvider');
 
 /**
  * Registry & Factory for Payment Providers
@@ -7,10 +9,12 @@ const TeslaPayProvider = require('./TeslaPayProvider');
 class PaymentProviderFactory {
   constructor() {
     this.providers = new Map();
-    // Register default built-in providers
+    // Register built-in payment providers
     this.register('STRIPE', new StripePaymentProvider());
     this.register('TESLA_PAY', new TeslaPayProvider());
     this.register('SIMULATED', new TeslaPayProvider({ webhookSecret: 'simulated_secret_key' }));
+    this.register('NOWPAYMENTS', new NOWPaymentsProvider());
+    this.register('KORA', new KoraProvider());
   }
 
   /**
@@ -40,7 +44,7 @@ class PaymentProviderFactory {
       return this.providers.get(defaultProviderName);
     }
 
-    return this.providers.get('TESLA_PAY') || this.providers.get('STRIPE');
+    return this.providers.get('NOWPAYMENTS') || this.providers.get('KORA') || this.providers.get('TESLA_PAY') || this.providers.get('STRIPE');
   }
 
   /**

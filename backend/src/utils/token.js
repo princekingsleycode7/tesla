@@ -27,11 +27,29 @@ function generateRandomToken(bytes = 32) {
  * @param {object} [options={}]
  * @returns {string}
  */
-function generateAuthToken(payload, options = {}) {
-  const secret = env.JWT_SECRET;
-  const expiresIn = options.expiresIn || env.JWT_EXPIRES_IN || '7d';
+function isValidTimespan(val) {
+  if (typeof val === 'number') return !isNaN(val);
+  if (typeof val === 'string') {
+    return /^\d+\s*(s|m|h|d|w|y)?$/i.test(val.trim());
+  }
+  return false;
+}
+
+function generateAuthToken(payload = {}, options = {}) {
+  const secret = (env && env.JWT_SECRET) ? env.JWT_SECRET : (process.env.JWT_SECRET || 'dev-default-secret-do-not-use-in-production');
+  const cleanPayload = { ...payload };
+  delete cleanPayload.exp;
+  delete cleanPayload.iat;
+
+  const { expiresIn: optExpiresIn, ...restOptions } = options || {};
+  let rawExpires = optExpiresIn || (env && env.JWT_EXPIRES_IN) || process.env.JWT_EXPIRES_IN || '7d';
+
+  if (!isValidTimespan(rawExpires)) {
+    rawExpires = '7d';
+  }
+
   const jti = crypto.randomUUID();
-  return jwt.sign({ ...payload, jti }, secret, { expiresIn, ...options });
+  return jwt.sign({ ...cleanPayload, jti }, secret, { expiresIn: rawExpires, ...restOptions });
 }
 
 /**

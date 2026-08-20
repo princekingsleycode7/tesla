@@ -1712,7 +1712,9 @@
           <span class="nk-right-label" style="color: #fff;">${firstName}</span>
         `;
         rightPill.style.cursor = 'pointer';
-        rightPill.onclick = () => openAuthModal('portal');
+        rightPill.onclick = () => {
+          window.location.href = '/dashboard';
+        };
       } else {
         rightPill.innerHTML = `
           <span class="nk-right-icon-circle">

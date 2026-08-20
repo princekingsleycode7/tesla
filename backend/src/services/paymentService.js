@@ -12,16 +12,51 @@ const logger = require('../utils/logger');
 
 // Valid state machine transitions
 const VALID_TRANSITIONS = {
-  PENDING: ['PROCESSING', 'SUCCESS', 'SUCCEEDED', 'FAILED', 'CANCELLED'],
-  PROCESSING: ['SUCCESS', 'SUCCEEDED', 'FAILED', 'CANCELLED'],
+  PENDING: ['PROCESSING', 'AWAITING_PAYMENT', 'CONFIRMING', 'SUCCESS', 'SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'],
+  AWAITING_PAYMENT: ['CONFIRMING', 'SUCCESS', 'SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'],
+  CONFIRMING: ['SUCCESS', 'SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'],
+  PROCESSING: ['SUCCESS', 'SUCCEEDED', 'COMPLETED', 'FAILED', 'CANCELLED'],
   SUCCESS: ['REFUNDED'],
   SUCCEEDED: ['REFUNDED'],
+  COMPLETED: ['REFUNDED'],
   FAILED: [],
   CANCELLED: [],
+  EXPIRED: [],
   REFUNDED: []
 };
 
 class PaymentService {
+  /**
+   * Returns available payment methods and channels based on server configuration
+   */
+  getAvailablePaymentMethods() {
+    const koraEnabled = process.env.ENABLE_KORA_PAYMENTS === 'true' || process.env.ENABLE_TRADITIONAL_PAYMENTS !== 'false';
+    const cryptoEnabled = process.env.ENABLE_NOWPAYMENTS === 'true' || process.env.ENABLE_CRYPTO_PAYMENTS !== 'false';
+
+    const nowpaymentsProvider = paymentProviderFactory.getProvider('NOWPAYMENTS');
+    const availableCryptoCurrencies = (nowpaymentsProvider && typeof nowpaymentsProvider.getAvailableCurrencies === 'function')
+      ? nowpaymentsProvider.getAvailableCurrencies()
+      : [];
+
+    return {
+      traditional: {
+        enabled: koraEnabled,
+        provider: process.env.TRADITIONAL_PAYMENT_PROVIDER || 'KORA',
+        channels: [
+          { id: 'card', name: 'Credit / Debit Card', description: 'Instant Visa, Mastercard, AMEX' },
+          { id: 'bank_transfer', name: 'Bank Wire / Transfer', description: 'Direct ACH & FedWire Transfer' },
+          { id: 'direct_debit', name: 'Direct Account Debit', description: 'Automated recurring investment debit' }
+        ]
+      },
+      crypto: {
+        enabled: cryptoEnabled,
+        provider: 'NOWPAYMENTS',
+        currencies: availableCryptoCurrencies
+      },
+      mode: (koraEnabled && cryptoEnabled) ? 'BOTH' : (koraEnabled ? 'TRADITIONAL_ONLY' : (cryptoEnabled ? 'CRYPTO_ONLY' : 'NONE'))
+    };
+  }
+
   /**
    * Initializes a payment order and requests a checkout session from the provider
    */
@@ -34,6 +69,8 @@ class PaymentService {
       currency = 'USD',
       planId = null,
       paymentMethod = 'DIRECT_ALLOCATION',
+      paymentMethodType = 'TRADITIONAL',
+      cryptoCurrency = null,
       provider: requestedProvider = null,
       idempotencyKey,
       returnUrl = 'https://tesla.com/portal',
@@ -54,6 +91,32 @@ class PaymentService {
       const error = new Error(`Unsupported currency: ${safeCurrency}. Only USD is accepted.`);
       error.statusCode = 400;
       error.code = 'UNSUPPORTED_CURRENCY';
+      throw error;
+    }
+
+    // Determine target provider based on paymentMethodType or requestedProvider
+    let targetProviderName = requestedProvider;
+    if (!targetProviderName) {
+      if (paymentMethodType === 'CRYPTO') {
+        targetProviderName = 'NOWPAYMENTS';
+      } else {
+        targetProviderName = process.env.TRADITIONAL_PAYMENT_PROVIDER || 'KORA';
+      }
+    }
+
+    // Server-side provider availability enforcement
+    const methodsConfig = this.getAvailablePaymentMethods();
+    if (targetProviderName === 'NOWPAYMENTS' && !methodsConfig.crypto.enabled) {
+      const error = new Error('Cryptocurrency payments are currently disabled on this server');
+      error.statusCode = 400;
+      error.code = 'CRYPTO_PAYMENTS_DISABLED';
+      throw error;
+    }
+
+    if ((targetProviderName === 'KORA' || targetProviderName === 'TESLA_PAY' || targetProviderName === 'STRIPE') && !methodsConfig.traditional.enabled) {
+      const error = new Error('Traditional payment gateway is currently disabled on this server');
+      error.statusCode = 400;
+      error.code = 'TRADITIONAL_PAYMENTS_DISABLED';
       throw error;
     }
 
@@ -103,8 +166,10 @@ class PaymentService {
     }
 
     // 3. Resolve Provider
-    const providerInstance = paymentProviderFactory.getProvider(requestedProvider);
+    const providerInstance = paymentProviderFactory.getProvider(targetProviderName);
     const providerName = providerInstance.getProviderName();
+
+    const initialStatus = (providerName === 'NOWPAYMENTS') ? 'AWAITING_PAYMENT' : 'PENDING';
 
     // 4. Atomic Database Setup
     const payment = await withTransaction(async (client) => {
@@ -121,6 +186,8 @@ class PaymentService {
         metadata: {
           planId: plan ? plan.id : null,
           provider: providerName,
+          paymentMethodType,
+          cryptoCurrency,
           ...metadata
         }
       }, client);
@@ -132,15 +199,20 @@ class PaymentService {
         provider: providerName,
         amount: numAmount,
         currency: safeCurrency,
-        status: 'PENDING',
+        paymentCurrency: safeCurrency,
+        cryptoCurrency: cryptoCurrency ? cryptoCurrency.toUpperCase() : null,
+        status: initialStatus,
         idempotencyKey: effectiveIdempotencyKey,
         paymentMethodDetails: {
           method: paymentMethod,
+          type: paymentMethodType,
+          cryptoCurrency,
           channel: 'DIGITAL_GATEWAY'
         },
         metadata: {
           planId: plan ? plan.id : null,
           planName: plan ? plan.name : null,
+          paymentMethodType,
           ...metadata
         }
       }, client);
@@ -148,12 +220,13 @@ class PaymentService {
       return createdPayment;
     });
 
-    // 5. Call Provider to Generate Payment Request / Checkout URL
+    // 5. Call Provider to Generate Payment Request / Checkout URL / Crypto Address
     try {
       const providerResult = await providerInstance.createPayment({
         paymentId: payment.id,
         amount: numAmount,
         currency: safeCurrency,
+        payCurrency: cryptoCurrency || 'BTC',
         description: plan ? `Tesla Allocation: ${plan.name}` : 'Tesla Account Funding',
         metadata: {
           paymentId: payment.id,
@@ -166,14 +239,28 @@ class PaymentService {
         userName
       });
 
-      // Update payment with provider IDs and checkout URL
-      const updatedPayment = await paymentRepository.updateStatus(payment.id, 'PENDING', {
+      // Update payment with provider IDs, checkout URL, and crypto details
+      const updatedPayment = await paymentRepository.updateStatus(payment.id, providerResult.status || initialStatus, {
         providerPaymentId: providerResult.providerPaymentId,
         providerSessionId: providerResult.providerSessionId,
+        checkoutUrl: providerResult.checkoutUrl,
+        cryptoCurrency: providerResult.cryptoCurrency || (cryptoCurrency ? cryptoCurrency.toUpperCase() : null),
+        network: providerResult.network || null,
+        cryptoAmount: providerResult.cryptoAmount || null,
+        paymentAddress: providerResult.paymentAddress || null,
+        expiration: providerResult.expiration || null,
+        fiatAmount: numAmount,
         metadata: {
           ...payment.metadata,
           checkoutUrl: providerResult.checkoutUrl,
-          clientSecret: providerResult.clientSecret
+          clientSecret: providerResult.clientSecret,
+          cryptoDetails: providerResult.cryptoAmount ? {
+            cryptoCurrency: providerResult.cryptoCurrency,
+            network: providerResult.network,
+            cryptoAmount: providerResult.cryptoAmount,
+            paymentAddress: providerResult.paymentAddress,
+            expiration: providerResult.expiration
+          } : null
         }
       });
 
@@ -188,7 +275,14 @@ class PaymentService {
         payment: {
           ...updatedPayment,
           checkoutUrl: providerResult.checkoutUrl,
-          clientSecret: providerResult.clientSecret
+          clientSecret: providerResult.clientSecret,
+          cryptoDetails: providerResult.cryptoAmount ? {
+            cryptoCurrency: providerResult.cryptoCurrency,
+            network: providerResult.network,
+            cryptoAmount: providerResult.cryptoAmount,
+            paymentAddress: providerResult.paymentAddress,
+            expiration: providerResult.expiration
+          } : null
         },
         isIdempotentReplay: false
       };
@@ -223,6 +317,8 @@ class PaymentService {
     // 1. Signature Verification
     const signature = headers['x-tesla-signature'] || 
                       headers['stripe-signature'] || 
+                      headers['x-nowpayments-sig'] || 
+                      headers['x-korapay-signature'] || 
                       headers['x-signature'] || 
                       headers['x-webhook-signature'] || '';
 
@@ -369,9 +465,11 @@ class PaymentService {
       const currentPayment = await paymentRepository.findById(payment.id, client);
       const currentStatus = currentPayment.status;
 
+      const isSuccessfulTarget = (targetStatus === 'SUCCESS' || targetStatus === 'SUCCEEDED' || targetStatus === 'COMPLETED');
+
       // Handle Already Completed / Settled
-      if (currentStatus === 'SUCCESS' || currentStatus === 'SUCCEEDED') {
-        if (targetStatus === 'SUCCESS' || targetStatus === 'SUCCEEDED') {
+      if (currentStatus === 'SUCCESS' || currentStatus === 'SUCCEEDED' || currentStatus === 'COMPLETED') {
+        if (isSuccessfulTarget) {
           logger.info('Payment already in SUCCESS state, skipping duplicate execution', {
             paymentId: currentPayment.id
           });
@@ -402,7 +500,6 @@ class PaymentService {
           targetStatus,
           paymentId: currentPayment.id
         });
-        // Still record event but do not corrupt state
         await webhookEventRepository.recordEvent({
           eventId,
           provider: resolvedProviderName,
@@ -425,10 +522,12 @@ class PaymentService {
       // Execute State Transitions
       let updatedPayment = currentPayment;
 
-      if (targetStatus === 'SUCCESS' || targetStatus === 'SUCCEEDED') {
+      if (isSuccessfulTarget) {
         // 1. Mark Payment as SUCCESS
         updatedPayment = await paymentRepository.updateStatus(currentPayment.id, 'SUCCESS', {
           providerPaymentId: providerPaymentId || currentPayment.providerPaymentId,
+          transactionHash: event.transactionHash || currentPayment.transactionHash,
+          cryptoAmount: event.cryptoAmount || currentPayment.cryptoAmount,
           metadata: {
             ...currentPayment.metadata,
             verifiedAt: new Date().toISOString(),
@@ -450,29 +549,23 @@ class PaymentService {
         if (planId) {
           const plan = await planRepository.findById(planId, client);
           if (plan) {
-            const certId = `TSLA-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-            const units = investmentCalculationService.calculateUnits(currentPayment.amount, plan.unitPrice);
-            const calculations = investmentCalculationService.calculateProjectedReturns(
-              currentPayment.amount,
-              plan.expectedRoiPercentage,
-              plan.durationMonths
-            );
-            const maturityDate = investmentCalculationService.calculateMaturityDate(plan.durationMonths);
+            const metrics = investmentCalculationService.calculateInvestmentMetrics(plan, currentPayment.amount);
+            const certId = investmentCalculationService.generateCertificateId();
 
             const investment = await investmentRepository.create({
               userId: currentPayment.userId,
               productId: plan.id,
-              units,
-              pricePerUnit: plan.unitPrice,
+              units: metrics.units,
+              pricePerUnit: metrics.pricePerUnit,
               totalAmount: currentPayment.amount,
               currency: currentPayment.currency,
               status: 'ACTIVE',
               certificateId: certId,
-              startDate: new Date(),
-              maturityDate,
-              expectedReturnAmount: calculations.expectedReturnAmount,
-              expectedTotalPayout: calculations.expectedTotalPayout,
-              returnRate: plan.expectedRoiPercentage,
+              startDate: metrics.startDate,
+              maturityDate: metrics.maturityDate,
+              expectedReturnAmount: metrics.expectedReturnAmount,
+              expectedTotalPayout: metrics.expectedTotalPayout,
+              returnRate: metrics.returnRate,
               idempotencyKey: `inv_pay_${currentPayment.id}`,
               metadata: {
                 paymentId: currentPayment.id,
@@ -506,28 +599,28 @@ class PaymentService {
           metadata: { eventId, eventType }
         }, client);
 
-      } else if (targetStatus === 'FAILED') {
-        updatedPayment = await paymentRepository.updateStatus(currentPayment.id, 'FAILED', {
+      } else if (targetStatus === 'FAILED' || targetStatus === 'EXPIRED') {
+        updatedPayment = await paymentRepository.updateStatus(currentPayment.id, targetStatus, {
           errorDetails: {
-            reason: event.raw?.failure_message || 'Payment execution failed at gateway',
+            reason: event.raw?.failure_message || `Payment status transitioned to ${targetStatus}`,
             eventId,
             timestamp: new Date().toISOString()
           }
         }, client);
 
         if (currentPayment.transactionId) {
-          await transactionRepository.updateStatus(currentPayment.transactionId, 'FAILED', {
-            reason: 'Payment failed at gateway'
+          await transactionRepository.updateStatus(currentPayment.transactionId, targetStatus, {
+            reason: `Payment ${targetStatus.toLowerCase()} at gateway`
           }, client);
         }
 
         await auditRepository.create({
           userId: currentPayment.userId,
-          action: 'PAYMENT_FAILED',
+          action: `PAYMENT_${targetStatus}`,
           entityType: 'PAYMENT',
           entityId: currentPayment.id,
           oldData: { status: currentStatus },
-          newData: { status: 'FAILED' },
+          newData: { status: targetStatus },
           metadata: { eventId, eventType }
         }, client);
 
@@ -544,32 +637,14 @@ class PaymentService {
           await transactionRepository.updateStatus(currentPayment.transactionId, 'CANCELLED', {}, client);
         }
 
-      } else if (targetStatus === 'REFUNDED') {
-        updatedPayment = await paymentRepository.updateStatus(currentPayment.id, 'REFUNDED', {
+      } else {
+        // Intermediate status update (e.g. AWAITING_PAYMENT, CONFIRMING, PROCESSING)
+        updatedPayment = await paymentRepository.updateStatus(currentPayment.id, targetStatus, {
+          transactionHash: event.transactionHash || currentPayment.transactionHash,
+          cryptoAmount: event.cryptoAmount || currentPayment.cryptoAmount,
           metadata: {
             ...currentPayment.metadata,
-            refundedAt: new Date().toISOString(),
-            eventId
-          }
-        }, client);
-
-        if (currentPayment.transactionId) {
-          await transactionRepository.updateStatus(currentPayment.transactionId, 'REVERSED', {
-            refundEventId: eventId
-          }, client);
-        }
-
-        // Create immutable REFUND transaction record
-        await transactionRepository.create({
-          referenceId: `TX-REF-${Date.now()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
-          userId: currentPayment.userId,
-          type: 'REFUND',
-          amount: currentPayment.amount,
-          currency: currentPayment.currency,
-          status: 'SETTLED',
-          description: `Refund for payment ${currentPayment.id}`,
-          metadata: {
-            originalPaymentId: currentPayment.id,
+            updatedAt: new Date().toISOString(),
             eventId
           }
         }, client);

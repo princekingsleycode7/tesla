@@ -5,6 +5,22 @@ const paymentService = require('../services/paymentService');
  */
 const paymentController = {
   /**
+   * Retrieves active payment options and provider availability
+   * GET /api/v1/payments/methods
+   */
+  async getPaymentMethods(req, res, next) {
+    try {
+      const methods = paymentService.getAvailablePaymentMethods();
+      return res.status(200).json({
+        success: true,
+        data: methods
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /**
    * Initializes a payment checkout order
    * POST /api/v1/payments/initialize
    */
@@ -15,6 +31,8 @@ const paymentController = {
         currency,
         planId,
         paymentMethod,
+        paymentMethodType,
+        cryptoCurrency,
         provider,
         idempotencyKey,
         returnUrl,
@@ -30,6 +48,8 @@ const paymentController = {
         currency,
         planId,
         paymentMethod,
+        paymentMethodType,
+        cryptoCurrency,
         provider,
         idempotencyKey,
         returnUrl,
